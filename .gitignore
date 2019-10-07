@@ -1,0 +1,7 @@
+.code-workspace.code-workspace
+.vscode
+*.o
+*.obj
+build
+*.params
+/examples/data/mnist/*

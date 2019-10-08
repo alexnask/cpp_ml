@@ -8,8 +8,6 @@
 #include <neural_network.h>
 #include <ranges.h>
 
-// To big endian: std::ranges::swap(b, b + sizeof(TYPE))
-
 void print_params(auto const& nn) {
     auto cout_it = std::ranges::ostream_iterator<double> { std::cout, " " };
 
@@ -314,7 +312,7 @@ int main(int argc, char const* argv[]) {
         return x;
     };
 
-    // Make a Neural Network, initialize all parameters to 0.
+    // Make a Neural Network (all parameters are randomly initialized by default).
     auto nn = std::make_unique<NeuralNetwork<ReLU, double, 28*28, 32, 10>>();
 
     char const* params_path = "examples/mnist.params";
@@ -367,7 +365,7 @@ int main(int argc, char const* argv[]) {
 
     // TODO: Time how long it takes with diff Batch Sizes then parallelize inside each batch.
     constexpr std::size_t BatchSize = 20;
-    constexpr std::size_t TrainingLoops = 20;
+    constexpr std::size_t TrainingLoops = 1050;
     std::size_t correct_predictions = 0;
     {
         auto training_images_it = image_data_it(data_path + "train-images.idx3-ubyte");
@@ -392,7 +390,7 @@ int main(int argc, char const* argv[]) {
 
         for (std::size_t loop = 0; loop < TrainingLoops; loop++) {
             std::cout << "LOOP " << loop + 1 << '/' << TrainingLoops << '\n';
-            auto [batch_cost, batch_correct_predictions] = nn->train<BatchSize, Threads, CostFunction, SamePred>(0.01, input_it, true_output_it);
+            auto [batch_cost, batch_correct_predictions] = nn->train<BatchSize, Threads, CostFunction, SamePred>(0.1, input_it, true_output_it);
             std::cout << "Batch cost: " << batch_cost << "\n\n";
 
             correct_predictions += batch_correct_predictions;

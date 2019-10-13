@@ -4,13 +4,17 @@
 #include "ranges.h"
 
 #include <random>
-#include <future>
+#include <thread>
 #include <array>
 #include <algorithm>
 #include <utility>
 
 #include "autodiff.h"
 #include "tensors.h"
+
+// TODO: Different architecture.
+// nn namespace, with some degault activations and cost functions.
+// nn::make<...>() returns the neural network, can specify storage policy for temporaries etc.
 
 namespace details {
 
@@ -181,6 +185,8 @@ class NeuralNetwork {
     details::WeightStorage<DiffT, Sizes...> weight_data;
     details::BiasStorageStart<DiffT, Sizes...> bias_data;
 
+    // TODO: Add a bool template param that controls wether we need derivative data.
+    // If we don't, just keep values from calculations.
     template <std::size_t Step, std::size_t S>
     inline auto calculate_step(std::unique_ptr<Tensor<ValT, S>> prev) const {
         if constexpr (Step == HiddenLayers + 1) {
@@ -239,21 +245,90 @@ class NeuralNetwork {
         }
     }
 
+
+    template <std::size_t BatchSize, std::size_t NThreads, auto CostF, auto SamePred, typename InputIt, typename ExpOutputIt>
+    requires std::is_invocable_v<decltype(CostF), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&> &&
+             std::is_same_v<ValT, std::invoke_result_t<decltype(CostF), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&>> &&
+             std::is_invocable_v<decltype(SamePred), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&> &&
+             std::is_same_v<bool, std::invoke_result_t<decltype(SamePred), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&>>
+    std::pair<std::unique_ptr<ValT>, std::size_t> feed_batch(InputIt& input_it, ExpOutputIt& expected_output_it) {
+        constexpr auto Loops = (BatchSize + NThreads - 1) / NThreads;
+
+        auto batch_cost = std::make_unique<ValT>(0);
+        std::size_t batch_idx = 0;
+        std::size_t correct_predicitons = 0;
+
+        for (std::size_t loop = 0; loop < Loops; loop++) {
+            std::array<std::unique_ptr<Tensor<ValT, OutputSize>>, NThreads> results;
+            std::array<std::thread, NThreads> threads;
+
+            for (std::size_t i = 0; i < NThreads && batch_idx + i < BatchSize; i++) {
+                auto input = *input_it;
+                ++input_it;
+
+                threads[i] = std::thread {
+                    [this, i, &results] (auto&& tensor) {
+                        results[i] = feed_forward(tensor);
+                    },
+                    std::move(input)
+                };
+            }
+
+            for (auto& thread : threads) {
+                thread.join();
+            }
+
+            for (std::size_t i = 0; i < NThreads && batch_idx < BatchSize; i++, batch_idx++) {
+                auto& output = results[i];
+
+                auto expected_output = *expected_output_it;
+                ++expected_output_it;
+
+                *batch_cost += CostF(*output, expected_output);
+                if (SamePred(*output, expected_output)) {
+                    correct_predicitons++;
+                }
+            }
+        }
+        *batch_cost /= BatchSize;
+
+        return { std::move(batch_cost), correct_predicitons };
+    }
 public:
     NeuralNetwork() {
+        random_param_initialization();
+    }
+
+    NeuralNetwork(NumT const& val) {
+        initialize_params_as(val);
+    }
+
+    void apply_to_params(auto&& f) {
+        apply_to_weights<0>(f);
+        apply_to_biases<0>(f);
+    }
+
+    void initialize_params_as(NumT const& val) {
+        std::size_t index = 0;
+
+        apply_to_params([val, &index] (auto& tensor) {
+            for (auto& elem : tensor) {
+                elem = { val, index++ };
+            }
+        });
+
+        assert(index == ParameterCount);
+    }
+
+    void random_param_initialization() {
         std::random_device rd {};
         std::mt19937 gen { rd() };
         std::normal_distribution<NumT> distr { 0 };
 
         std::size_t index = 0;
-        apply_to_weights<0>([&distr, &gen, &index] (auto& tensor) {
-            for (auto& elem : tensor) {
-                elem = { distr(gen), index++ };
-            }
-        });
 
-        apply_to_biases<0>([&distr, &gen, &index] (auto& tensor) {
-            for (auto& elem: tensor) {
+        apply_to_params([&distr, &gen, &index] (auto& tensor) {
+            for (auto& elem : tensor) {
                 elem = { distr(gen), index++ };
             }
         });
@@ -267,7 +342,7 @@ public:
 
     auto feed_forward(Tensor<NumT, InputSize> const& input) {
         auto true_input = std::make_unique<Tensor<ValT, InputSize>>();
-        std::ranges::copy(input | std::views::transform([](NumT const& x) { return ValT { x }; } ), std::ranges::begin(*true_input));
+        std::ranges::copy(input, std::ranges::begin(*true_input));
         return calculate_step<0>(std::move(true_input));
     }
 
@@ -278,126 +353,64 @@ public:
         auto out = std::make_unique<Tensor<ValT, OutputSize, BatchSize>>();
         std::size_t batch_idx = 0;
         for (std::size_t loop = 0; loop < Loops; loop++) {
-            std::array<std::future<std::unique_ptr<Tensor<ValT, OutputSize>>>, NThreads> futures;
+            std::array<std::unique_ptr<Tensor<ValT, OutputSize>>, NThreads> results;
+            std::array<std::thread, NThreads> threads;
 
             for (std::size_t i = 0; i < NThreads && batch_idx + i < BatchSize; i++) {
                 auto input = *it;
                 ++it;
 
-                futures[i] = std::async(std::launch::async, [this] (auto&& tensor) {
-                    return feed_forward(tensor);
-                }, std::move(input));
+                threads[i] = std::thread {
+                    [this, i, &results] (auto&& tensor) {
+                        results[i] = feed_forward(tensor);
+                    },
+                    std::move(input)
+                };
+            }
+
+            for (auto& thread : threads) {
+                thread.join();
             }
 
             for (std::size_t i = 0; i < NThreads && batch_idx < BatchSize; i++, batch_idx++) {
                 auto out_view = out->template view<0>({ batch_idx });
-                std::ranges::copy(*futures[i].get(), out_view.begin());
+                std::ranges::copy(*results[i], out_view.begin());
             }
         }
 
         return out;
     }
 
-    // TODO: This is the same as train() minus a single call, abstract away into a private helper that returns std::move(batch_cost), correct_predictions
-    // Returns batch cost and correct predictions.
     template <std::size_t BatchSize, std::size_t NThreads, auto CostF, auto SamePred, typename InputIt, typename ExpOutputIt>
-    requires std::is_invocable_v<decltype(CostF), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&> &&
-             std::is_same_v<ValT, std::invoke_result_t<decltype(CostF), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&>> &&
-             std::is_invocable_v<decltype(SamePred), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&> &&
-             std::is_same_v<bool, std::invoke_result_t<decltype(SamePred), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&>>
+    requires std::is_invocable_v<decltype(CostF), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&> &&
+             std::is_same_v<ValT, std::invoke_result_t<decltype(CostF), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&>> &&
+             std::is_invocable_v<decltype(SamePred), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&> &&
+             std::is_same_v<bool, std::invoke_result_t<decltype(SamePred), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&>>
     std::pair<NumT, std::size_t> feed_forward(InputIt& input_it, ExpOutputIt& expected_output_it) {
-        constexpr auto Loops = (BatchSize + NThreads - 1) / NThreads;
-
-        auto batch_cost = std::make_unique<ValT>(0);
-        std::size_t batch_idx = 0;
-        std::size_t correct_predicitons = 0;
-
-        for (std::size_t loop = 0; loop < Loops; loop++) {
-            std::array<std::future<std::unique_ptr<Tensor<ValT, OutputSize>>>, NThreads> futures;
-
-            for (std::size_t i = 0; i < NThreads && batch_idx + i < BatchSize; i++) {
-                auto input = *input_it;
-                ++input_it;
-
-                futures[i] = std::async(std::launch::async, [this] (auto&& tensor) {
-                    return feed_forward(tensor);
-                }, std::move(input));
-            }
-
-            for (std::size_t i = 0; i < NThreads && batch_idx < BatchSize; i++, batch_idx++) {
-                auto output = futures[i].get();
-                auto expected_output = *expected_output_it;
-                ++expected_output_it;
-
-                *batch_cost += CostF(*output, expected_output);
-                if (SamePred(*output, expected_output)) {
-                    correct_predicitons++;
-                }
-            }
-        }
-        *batch_cost /= BatchSize;
-
-        return { batch_cost->value(), correct_predicitons };
+        auto [cost, corr_pred] = feed_batch<BatchSize, NThreads, CostF, SamePred>(input_it, expected_output_it);
+        return { cost->value(), corr_pred };
     }
 
     // Returns batch cost and correct predictions.
     template <std::size_t BatchSize, std::size_t NThreads, auto CostF, auto SamePred, typename InputIt, typename ExpOutputIt>
-    requires std::is_invocable_v<decltype(CostF), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&> &&
-             std::is_same_v<ValT, std::invoke_result_t<decltype(CostF), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&>> &&
-             std::is_invocable_v<decltype(SamePred), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&> &&
-             std::is_same_v<bool, std::invoke_result_t<decltype(SamePred), Tensor<ValT, OutputSize>&, Tensor<NumT, OutputSize> const&>>
+    requires std::is_invocable_v<decltype(CostF), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&> &&
+             std::is_same_v<ValT, std::invoke_result_t<decltype(CostF), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&>> &&
+             std::is_invocable_v<decltype(SamePred), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&> &&
+             std::is_same_v<bool, std::invoke_result_t<decltype(SamePred), Tensor<ValT, OutputSize>&, std::ranges::iter_value_t<ExpOutputIt> const&>>
     std::pair<NumT, std::size_t> train(NumT const& learning_rate, InputIt& input_it, ExpOutputIt& expected_output_it) {
-        constexpr auto Loops = (BatchSize + NThreads - 1) / NThreads;
-
-        auto batch_cost = std::make_unique<ValT>(0);
-        std::size_t batch_idx = 0;
-        std::size_t correct_predicitons = 0;
-
-        for (std::size_t loop = 0; loop < Loops; loop++) {
-            std::array<std::future<std::unique_ptr<Tensor<ValT, OutputSize>>>, NThreads> futures;
-
-            for (std::size_t i = 0; i < NThreads && batch_idx + i < BatchSize; i++) {
-                auto input = *input_it;
-                ++input_it;
-
-                futures[i] = std::async(std::launch::async, [this] (auto&& tensor) {
-                    return feed_forward(tensor);
-                }, std::move(input));
-            }
-
-            for (std::size_t i = 0; i < NThreads && batch_idx < BatchSize; i++, batch_idx++) {
-                auto output = futures[i].get();
-                auto expected_output = *expected_output_it;
-                ++expected_output_it;
-
-                *batch_cost += CostF(*output, expected_output);
-                if (SamePred(*output, expected_output)) {
-                    correct_predicitons++;
-                }
-            }
-        }
-        *batch_cost /= BatchSize;
+        auto [batch_cost, correct_predicitons] = feed_batch<BatchSize, NThreads, CostF, SamePred>(input_it, expected_output_it);
         update_parameters(learning_rate, *batch_cost);
-
         return { batch_cost->value(), correct_predicitons };
     }
 
     void update_parameters(NumT const& learning_rate, autodiff::val<NumT, ParameterCount> const& cost) {
         std::size_t index = 0;
-        apply_to_weights<0>([learning_rate, cost, &index] (auto& tensor) {
+        apply_to_params([learning_rate, cost, &index] (auto& tensor) {
             for (auto& elem : tensor) {
                 elem -= learning_rate * cost.derivative(index);
                 index++;
             }
         });
-
-        apply_to_biases<0>([learning_rate, cost, &index] (auto& tensor) {
-            for (auto& elem: tensor) {
-                elem -= learning_rate * cost.derivative(index);
-                index++;
-            }
-        });
-
         assert(index == ParameterCount);
     }
 

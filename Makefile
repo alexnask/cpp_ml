@@ -1,24 +1,27 @@
 CXX      := g++
-CXXFLAGS := -pedantic-errors -Wall -Wextra -std=c++2a -fconcepts -Werror -O3 -pthread #-g
+CXXFLAGS := -pedantic-errors -Wall -Wextra -std=c++2a -fconcepts -Werror -pthread -g -O3
 LDFLAGS  := #-lstdc++ -lm
 BUILD    := ./build
 OBJ_DIR  := $(BUILD)/objs
 BIN_DIR  := $(BUILD)/bin
-TARGET   := mnist
+# TARGET   := mnist
 INCLUDE  := -Iinclude/
-SRC      := $(wildcard examples/*.cpp)
 
-OBJECTS := $(SRC:%.cpp=$(OBJ_DIR)/%.o)
+EXA_SRC  := $(notdir $(wildcard examples/*.cpp))
+EXA_TARGETS := $(EXA_SRC:%.cpp=$(BIN_DIR)/%)
+EXA_OBJECTS := $(EXA_SRC:%.cpp=$(OBJ_DIR)/%.o)
 
-all: build $(BIN_DIR)/$(TARGET)
+all: build $(EXA_TARGETS)
 
-$(OBJ_DIR)/%.o: %.cpp
+.SECONDARY: $(EXA_OBJECTS)
+
+$(OBJ_DIR)/%.o: examples/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(INCLUDE) -o $@ -c $<
 
-$(BIN_DIR)/$(TARGET): $(OBJECTS)
+$(BIN_DIR)/%: $(OBJ_DIR)/%.o
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(INCLUDE) $(LDFLAGS) -o $(BIN_DIR)/$(TARGET) $(OBJECTS)
+	$(CXX) $(CXXFLAGS) $(INCLUDE) $(LDFLAGS) -o $@ $<
 
 .PHONY: all build clean debug release
 

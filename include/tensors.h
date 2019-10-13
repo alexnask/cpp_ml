@@ -612,6 +612,19 @@ public:
         std::ranges::fill(data, val);
     }
 
+    // TODO: Write 2D version.
+    template <typename... Args>
+    requires DataSize == sizeof...(Args)
+    Tensor(Args... args) {
+        std::size_t index = 0;
+        (..., (data[index++] = args));
+        assert(index == DataSize);
+    }
+
+    static constexpr std::size_t data_size() {
+        return DataSize;
+    }
+
     // Add another TensorLike compatible object.
     Self& operator+=(TensorLike<NumT, Sizes...> const& rhs) {
         auto it = std::ranges::begin(rhs);
@@ -713,10 +726,6 @@ public:
         res *= rhs;
         return res;
     }
-
-//     template <typename T, typename NumT, std::size_t... Sizes>
-// concept TensorView = sizeof...(Sizes) == 1 && requires { typename T::TensorType; } && std::is_same_v<typename T::TensorType::ValueType, NumT> &&
-//                      T::size() == details::get(std::index_sequence<Sizes...>{}, 0);
 
     // Multiply a constant to all elements of the tensor.
     Self& operator*=(NumT const& rhs) {

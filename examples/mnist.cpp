@@ -151,6 +151,7 @@ void switch_endianess(T& t) {
 auto label_data_it(std::string const& path) {
     struct label_it {
         using reference = Tensor<double, 10> const&;
+        using value_type [[maybe_unused]] = Tensor<double, 10>;
 
         std::ifstream fin;
         Tensor<double, 10> current_val;
@@ -209,6 +210,7 @@ auto label_data_it(std::string const& path) {
 auto image_data_it(std::string const& path) {
     struct image_it {
         using reference = Tensor<double, 28*28> const&;
+        using value_type [[maybe_unused]] = Tensor<double, 28*28>;
 
         std::ifstream fin;
         Tensor<double, 28*28> current_val;
@@ -272,7 +274,8 @@ auto image_data_it(std::string const& path) {
 template <typename InputIt, typename IndexIt>
 auto filter_with_indices(InputIt& input_it, IndexIt const& index_it) {
     struct iterator {
-        using reference = /* typename */ InputIt::reference;
+        using reference = InputIt::reference;
+        using value_type [[maybe_unused]] = InputIt::value_type;
 
         InputIt& input_it;
         IndexIt index_it;

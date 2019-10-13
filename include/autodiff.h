@@ -569,6 +569,15 @@ auto log(val<NumT, Vars> const& v) {
     return v.template apply_function<F, D>();
 }
 
+template <typename NumT, std::size_t Vars>
+auto abs(val<NumT, Vars> const& v) {
+    using std::abs;
+
+    constexpr auto F = [](NumT const& x) { return abs(x); };
+    constexpr auto D = [](NumT const& x) { return x < 0 ? -1 : 1; };
+    return v.template apply_function<F, D>();
+}
+
 // Make functions
 template <typename NumT>
 auto make_single_var(NumT const& val) {
